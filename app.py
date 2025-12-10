@@ -1317,13 +1317,13 @@ def main():
 
     preferred_order = [
         "gdp_yoy",
-        "gdp_qoq",
-        "cpi_yoy",
-        "ca_norm",
-        "fdi_level",
+        # "gdp_qoq",
+        # "cpi_yoy",
+        # "ca_norm",
+        # "fdi_level",
         "res_norm",
         "budget_level",
-        "fx_norm",
+        # "fx_norm",
     ]
     ind_options = [k for k in preferred_order if k in indicator_panels]
 
