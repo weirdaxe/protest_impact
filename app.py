@@ -144,7 +144,6 @@ def zscore_by_country(df: pd.DataFrame) -> pd.DataFrame:
         v = pd.to_numeric(g["value"], errors="coerce")
         mu = v.mean()
         sigma = v.std(ddof=0)
-        g = g.copy()
         if sigma == 0 or pd.isna(sigma):
             g["value"] = 0.0
         else:
@@ -382,9 +381,7 @@ def make_fdi_panel(df_fdi_raw: pd.DataFrame) -> pd.DataFrame:
     if "INDICATOR" in df.columns:
         df = df[
             df["INDICATOR"].astype(str).str.contains(
-                "Direct investment, Total financial assets/liabilities",
-                na=False,
-                regex=False,
+                "Direct investment", na=False, regex=False
             )
         ].copy()
 
@@ -412,54 +409,32 @@ def make_fdi_panel(df_fdi_raw: pd.DataFrame) -> pd.DataFrame:
     return df[["Country_standard", "period", "value"]]
 
 
-def make_reserves_panel(df_reserves_raw: pd.DataFrame) -> pd.DataFrame:
+def make_reserves_panel(df_res_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    Official reserve assets, monthly.
-    Returns level, y/y %, and z-score; app uses the level.
+    Official reserve assets, USD, monthly. Raw level; winsorised.
     """
-    df = df_reserves_raw.copy()
-    df.columns = df.columns.str.replace("\ufeff", "", regex=False).str.strip()
-
-    if "Country_standard" in df.columns:
-        df["Country_standard"] = df["Country_standard"].astype(str)
-    elif "COUNTRY" in df.columns:
-        df["Country_standard"] = df["COUNTRY"].astype(str)
-    else:
-        raise KeyError("Expected 'Country_standard' or 'COUNTRY' column in reserves data.")
-
+    df = df_res_raw.copy()
     df = df[df["Country_standard"].notna()].copy()
 
     if "INDICATOR" in df.columns:
-        mask_indicator = df["INDICATOR"].astype(str).str.contains(
-            "Official Reserve Assets", na=False, regex=False
-        )
-        df = df[mask_indicator].copy()
+        df = df[
+            df["INDICATOR"].astype(str).str.contains(
+                "Official Reserve Assets", na=False, regex=False
+            )
+        ].copy()
 
     if "FREQUENCY" in df.columns:
         df = df[df["FREQUENCY"] == "Monthly"].copy()
 
-    period_str = df["TIME_PERIOD"].astype(str).str.replace("-M", "-", regex=False)
-    df["period"] = pd.PeriodIndex(period_str, freq="M")
+    df["period"] = df["TIME_PERIOD"].astype(str).str.replace("-M", "-", regex=False)
+    df["period"] = pd.PeriodIndex(df["period"], freq="M")
 
     df["OBS_VALUE"] = pd.to_numeric(df["OBS_VALUE"], errors="coerce")
     df = df.dropna(subset=["OBS_VALUE"])
     df = df.rename(columns={"OBS_VALUE": "value"})
-
     df = df.sort_values(["Country_standard", "period"])
-
-    # y/y %
-    df["yoy_reserves"] = (
-        df.groupby("Country_standard")["value"]
-          .pct_change(12)
-          .mul(100)
-    )
-
-    # z-score of level
-    tmp_z = df[["Country_standard", "period", "value"]].copy()
-    tmp_z = zscore_by_country(tmp_z)
-    df["z_reserves"] = tmp_z["value"].values
-
-    return df[["Country_standard", "period", "value", "yoy_reserves", "z_reserves"]]
+    df = winsorize_panel(df)
+    return df[["Country_standard", "period", "value"]]
 
 
 def make_budget_panel(df_budget_raw: pd.DataFrame) -> pd.DataFrame:
@@ -506,69 +481,38 @@ def make_budget_panel(df_budget_raw: pd.DataFrame) -> pd.DataFrame:
     return df[["Country_standard", "period", "value"]]
 
 
-def make_fx_panel(df_fx_raw: pd.DataFrame) -> pd.DataFrame:
+def make_fx_norm_panel(df_fx_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    FX panel with:
-      - value: DC per USD level (EoP)
-      - mm_fx: m/m % change
-      - yy_fx: y/y % change
-      - mm_fx_ra: risk-adjusted m/m (mm_fx / vol)
-    App uses only level (value); returns are kept but not used in UI.
+    FX level: domestic currency per USD, EoP, monthly.
+    Return z-score by country (so cross-country pooled event paths are comparable).
     """
     df = df_fx_raw.copy()
-    df.columns = df.columns.str.replace("\ufeff", "", regex=False).str.strip()
-
-    if "Country_standard" in df.columns:
-        df["Country_standard"] = df["Country_standard"].astype(str)
-    elif "COUNTRY" in df.columns:
-        df["Country_standard"] = df["COUNTRY"].astype(str)
-    else:
-        raise KeyError("Expected 'Country_standard' or 'COUNTRY' column in FX data.")
-
     df = df[df["Country_standard"].notna()].copy()
 
     if "INDICATOR" in df.columns:
-        mask_indicator = df["INDICATOR"].astype(str).str.contains(
-            "Domestic currency per US Dollar", na=False, regex=False
-        )
-        df = df[mask_indicator].copy()
+        df = df[
+            df["INDICATOR"].astype(str).str.contains(
+                "Domestic currency per US Dollar",
+                na=False,
+                regex=False,
+            )
+        ].copy()
 
     if "FREQUENCY" in df.columns:
         df = df[df["FREQUENCY"] == "Monthly"].copy()
 
-    period_str = df["TIME_PERIOD"].astype(str).str.replace("-M", "-", regex=False)
-    df["period"] = pd.PeriodIndex(period_str, freq="M")
+    df["period"] = df["TIME_PERIOD"].astype(str).str.replace("-M", "-", regex=False)
+    df["period"] = pd.PeriodIndex(df["period"], freq="M")
 
     df["OBS_VALUE"] = pd.to_numeric(df["OBS_VALUE"], errors="coerce")
     df = df.dropna(subset=["OBS_VALUE"])
     df = df.rename(columns={"OBS_VALUE": "value"})
-
     df = df.sort_values(["Country_standard", "period"])
 
-    df["mm_fx"] = (
-        df.groupby("Country_standard")["value"]
-          .pct_change(1)
-          .mul(100)
-    )
-    df["yy_fx"] = (
-        df.groupby("Country_standard")["value"]
-          .pct_change(12)
-          .mul(100)
-    )
+    df = winsorize_panel(df)
+    df = zscore_by_country(df)
 
-    def _add_ra(g: pd.DataFrame) -> pd.DataFrame:
-        s = g["mm_fx"].dropna()
-        sigma = s.std(ddof=0)
-        g = g.copy()
-        if pd.isna(sigma) or sigma == 0:
-            g["mm_fx_ra"] = np.nan
-        else:
-            g["mm_fx_ra"] = g["mm_fx"] / sigma
-        return g
-
-    df = df.groupby("Country_standard", group_keys=False).apply(_add_ra)
-
-    return df[["Country_standard", "period", "value", "mm_fx", "yy_fx", "mm_fx_ra"]]
+    return df[["Country_standard", "period", "value"]]
 
 
 # =========================================================
@@ -594,32 +538,26 @@ def load_data():
 
     # IMF data: GDP
     df_gdp = pd.read_csv("imf_gdp_all.csv")
-    df_gdp.columns = df_gdp.columns.str.replace("\ufeff", "", regex=False).str.strip()
     df_gdp["Country_standard"] = df_gdp["COUNTRY"].map(canonicalize)
 
     # CPI
     df_cpi = pd.read_csv("imf_cpi_all.csv")
-    df_cpi.columns = df_cpi.columns.str.replace("\ufeff", "", regex=False).str.strip()
     df_cpi["Country_standard"] = df_cpi["COUNTRY"].map(canonicalize)
 
     # CA
     df_ca = pd.read_csv("imf_ca_all.csv")
-    df_ca.columns = df_ca.columns.str.replace("\ufeff", "", regex=False).str.strip()
     df_ca["Country_standard"] = df_ca["COUNTRY"].map(canonicalize)
 
     # FDI
     df_fdi = pd.read_csv("imf_fdi_all.csv")
-    df_fdi.columns = df_fdi.columns.str.replace("\ufeff", "", regex=False).str.strip()
     df_fdi["Country_standard"] = df_fdi["COUNTRY"].map(canonicalize)
 
     # Reserves
     df_res = pd.read_csv("imf_reserves_all.csv")
-    df_res.columns = df_res.columns.str.replace("\ufeff", "", regex=False).str.strip()
     df_res["Country_standard"] = df_res["COUNTRY"].map(canonicalize)
 
     # Budget
     df_budget = pd.read_csv("imf_budget_all.csv")
-    df_budget.columns = df_budget.columns.str.replace("\ufeff", "", regex=False).str.strip()
     df_budget["Country_standard"] = df_budget["COUNTRY"].map(canonicalize)
 
     indicator_panels: Dict[str, pd.DataFrame] = {}
@@ -665,10 +603,11 @@ def load_data():
         val4 = row["value"]
         if pd.isna(val4):
             continue
-        start_m = p.start_time.to_period("M")
-        end_m = p.end_time.to_period("M")
-        for m in pd.period_range(start_m, end_m, freq="M"):
-            rows.append({"Country_standard": c, "period": m, "value": val4})
+        if isinstance(p, pd.Period) and p.freqstr.upper().startswith("Q"):
+            start_m = p.start_time.to_period("M")
+            end_m = p.end_time.to_period("M")
+            for m in pd.period_range(start_m, end_m, freq="M"):
+                rows.append({"Country_standard": c, "period": m, "value": val4})
     gdp_4q_m = pd.DataFrame(rows)
     indicator_panels["gdp_4q_m"] = gdp_4q_m
     indicator_freq["gdp_4q_m"] = "M"
@@ -682,9 +621,9 @@ def load_data():
 
     # CA – USD level
     ca_panel = make_ca_panel(df_ca)
-    indicator_panels["ca_level"] = ca_panel
-    indicator_freq["ca_level"] = "Q"
-    indicator_labels["ca_level"] = "Current account balance, net (USD)"
+    indicator_panels["ca_norm"] = ca_panel
+    indicator_freq["ca_norm"] = "Q"
+    indicator_labels["ca_norm"] = "Current account balance, net (USD)"
 
     # FDI level – USD
     fdi_panel = make_fdi_panel(df_fdi)
@@ -692,11 +631,11 @@ def load_data():
     indicator_freq["fdi_level"] = "Q"
     indicator_labels["fdi_level"] = "FDI, net (USD)"
 
-    # Reserves – level (USD, monthly)
+    # Reserves – USD level
     res_panel = make_reserves_panel(df_res)
-    indicator_panels["res_level"] = res_panel[["Country_standard", "period", "value"]]
-    indicator_freq["res_level"] = "M"
-    indicator_labels["res_level"] = "Official reserves (USD)"
+    indicator_panels["res_norm"] = res_panel
+    indicator_freq["res_norm"] = "M"
+    indicator_labels["res_norm"] = "Official reserves (USD)"
 
     # Budget balance (domestic currency)
     budget_panel = make_budget_panel(df_budget)
@@ -704,15 +643,14 @@ def load_data():
     indicator_freq["budget_level"] = "Q"
     indicator_labels["budget_level"] = "Budget balance (net lending/borrowing, dom. currency)"
 
-    # FX: use your working make_fx_panel, but app only uses level
+    # FX (z-score level only)
     if os.path.exists("imf_fx_all.csv"):
         df_fx = pd.read_csv("imf_fx_all.csv")
-        df_fx.columns = df_fx.columns.str.replace("\ufeff", "", regex=False).str.strip()
         df_fx["Country_standard"] = df_fx["COUNTRY"].map(canonicalize)
-        fx_panel = make_fx_panel(df_fx)
-        indicator_panels["fx_level"] = fx_panel[["Country_standard", "period", "value"]]
-        indicator_freq["fx_level"] = "M"
-        indicator_labels["fx_level"] = "FX level (DC per USD, EoM)"
+        fx_panel = make_fx_norm_panel(df_fx)
+        indicator_panels["fx_norm"] = fx_panel
+        indicator_freq["fx_norm"] = "M"
+        indicator_labels["fx_norm"] = "FX (z-score, LC per USD, EoP)"
 
     return protest, indicator_panels, indicator_freq, indicator_labels
 
@@ -1323,8 +1261,7 @@ def run_event_study(
     used_ids = panel_protest[panel_protest["value"].notna()]["event_id"].unique()
     events_used_stats = events_current[events_current["event_id"].isin(used_ids)].copy()
 
-    # Median for FX, mean for others
-    agg_choice = "median" if indicator_key == "fx_level" else "mean"
+    agg_choice = "median" if indicator_key == "fx_norm" else "mean"
     path_protest = mean_path(
         panel_protest,
         lower_q=vol_q_low,
@@ -1382,11 +1319,11 @@ def main():
         "gdp_yoy",
         "gdp_qoq",
         "cpi_yoy",
-        "ca_level",
+        "ca_norm",
         "fdi_level",
-        "res_level",
+        "res_norm",
         "budget_level",
-        "fx_level",
+        "fx_norm",
     ]
     ind_options = [k for k in preferred_order if k in indicator_panels]
 
@@ -1404,7 +1341,7 @@ def main():
     freq = indicator_freq[ind_key]
 
     # Scale options: only allow "% of GDP" where it makes sense
-    if ind_key in ("ca_level", "fdi_level", "res_level", "budget_level"):
+    if ind_key in ("ca_norm", "fdi_level", "res_norm", "budget_level"):
         scale_opts = ["Raw level", "Min-max per event (T-window)", "As % of GDP"]
     else:
         scale_opts = ["Raw level", "Min-max per event (T-window)"]
@@ -1682,7 +1619,7 @@ def main():
             alpha=0.5,
         )
 
-    ax.axvline(0, linewidth=1, linestyle="--")
+    ax.axvline(0, color="k", linestyle="--", linewidth=1)
     ax.set_xlim(-base_pre, base_post)
     ax.set_xlabel("Periods relative to event (T = 0)")
     ax.set_ylabel(ylabel)
